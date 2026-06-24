@@ -1,21 +1,29 @@
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Drawing;
 using System.Media;
 using System.Windows.Forms;
 
 namespace KamoChatBotGUI
 {
+
     public partial class ChatBotForm : Form
     {
-        private Greeting greeting;
-        private ResponseEngine responseEngine;
-        private Random random;
-        private Dictionary<string, string> userMemory;
-        private string currentTopic;
-        private string userName;
+        private Greeting greeting = new Greeting();      // Initialize here
+        private ResponseEngine responseEngine = new ResponseEngine();  // Initialize here
+        private Random random = new Random();            // Initialize here
+        private Dictionary<string, string> userMemory = new Dictionary<string, string>();
+        private string currentTopic = "";
+        private string userName = "";
         private Image botImage;
         private Image userImage;
+
+        // Part 3 - Database objects
+        private DatabaseHelper dbHelper = new DatabaseHelper();
+        private TaskAssistant taskAssistant;
+        private QuizGame quizGame;
+        private ActivityLog activityLog;
 
         public ChatBotForm()
         {
@@ -56,6 +64,26 @@ namespace KamoChatBotGUI
             userMemory = new Dictionary<string, string>();
             currentTopic = "";
             userName = "";
+
+            // Enable auto-scroll for chat container
+            pnlChatContainer.AutoScroll = true;
+
+            // Part 3 - Initialize database
+            dbHelper = new DatabaseHelper();
+            dbHelper.CreateTables();
+
+            if (dbHelper.TestConnection())
+            {
+                AppendBotMessage("Database connected successfully!");
+            }
+            else
+            {
+                AppendBotMessage("Database connection failed. Check your internet.");
+            }
+
+            taskAssistant = new TaskAssistant(dbHelper);
+            quizGame = new QuizGame(dbHelper);
+            activityLog = new ActivityLog(dbHelper);
 
             PlayVoiceGreeting();
             DisplayAsciiArt();
@@ -201,6 +229,7 @@ namespace KamoChatBotGUI
         {
             string lowerInput = input.ToLower();
 
+            // Get user name if not set yet
             if (string.IsNullOrEmpty(userName))
             {
                 if (greeting.SetUserName(input))
@@ -208,6 +237,7 @@ namespace KamoChatBotGUI
                     userName = greeting.UserName;
                     userMemory["Name"] = userName;
                     AppendBotMessage(greeting.GetWelcomeMessage());
+                    ShowMainMenu();
                 }
                 else
                 {
@@ -216,31 +246,92 @@ namespace KamoChatBotGUI
                 return;
             }
 
+            // Check for exit
             if (lowerInput == "bye" || lowerInput == "exit")
             {
                 AppendBotMessage("Goodbye! Stay safe online.");
+                activityLog.AddLog("Exit", "User exited the chatbot");
                 return;
             }
 
-            if (lowerInput == "help" || lowerInput == "what can i ask")
+            // Check for help
+            if (lowerInput == "help" || lowerInput == "what can i ask" || lowerInput == "menu")
             {
-                AppendBotMessage(responseEngine.GetHelpMessage(userName));
+                ShowMainMenu();
                 return;
             }
 
+            // Part 3 - Task commands
+            if (lowerInput.Contains("add task"))
+            {
+                AddTaskThroughChat(input);
+                return;
+            }
+
+            if (lowerInput.Contains("view tasks") || lowerInput.Contains("show tasks") || lowerInput.Contains("list tasks"))
+            {
+                ViewTasks();
+                return;
+            }
+
+            if (lowerInput.Contains("complete task"))
+            {
+                CompleteTaskThroughChat(input);
+                return;
+            }
+
+            if (lowerInput.Contains("delete task"))
+            {
+                DeleteTaskThroughChat(input);
+                return;
+            }
+
+            // Part 3 - Quiz command
+            if (lowerInput.Contains("play quiz") || lowerInput.Contains("start quiz") || lowerInput.Contains("quiz"))
+            {
+                StartQuiz();
+                return;
+            }
+
+            // Part 3 - Activity log command
+            if (lowerInput.Contains("view log") || lowerInput.Contains("activity log") || lowerInput.Contains("what have you done"))
+            {
+                ShowActivityLog();
+                return;
+            }
+
+            // Part 3 - Scores command
+            if (lowerInput.Contains("scores") || lowerInput.Contains("leaderboard"))
+            {
+                ShowQuizScores();
+                return;
+            }
+
+            // Part 3 - Task count command
+            if (lowerInput.Contains("task count") || lowerInput.Contains("task summary"))
+            {
+                ShowTaskCount();
+                return;
+            }
+
+            // Check for memory recall
             if (lowerInput.Contains("remember") || lowerInput.Contains("what do you know"))
             {
                 RecallUserInfo();
                 return;
             }
 
+            // Check for follow up requests
             if (IsFollowUpRequest(lowerInput))
             {
                 HandleFollowUp();
                 return;
             }
 
+            // Sentiment detection
             string sentiment = DetectSentiment(lowerInput);
+
+            // Get response based on keywords
             string response = GetKeywordResponse(lowerInput, sentiment);
 
             if (response == null)
@@ -250,6 +341,233 @@ namespace KamoChatBotGUI
 
             AppendBotMessage(response);
             StoreCurrentTopic(lowerInput);
+        }
+
+        private void ShowMainMenu()
+        {
+            string menu = "Here is what I can help you with:" +
+                          Environment.NewLine + "- Type 'add task' to add a cybersecurity task" +
+                          Environment.NewLine + "- Type 'view tasks' to see your tasks" +
+                          Environment.NewLine + "- Type 'complete task' to mark a task as done" +
+                          Environment.NewLine + "- Type 'delete task' to remove a task" +
+                          Environment.NewLine + "- Type 'play quiz' to test your cybersecurity knowledge" +
+                          Environment.NewLine + "- Type 'view log' to see recent activity" +
+                          Environment.NewLine + "- Type 'scores' to see the leaderboard" +
+                          Environment.NewLine + "- Type 'task count' to see task summary" +
+                          Environment.NewLine + "- Type 'password tips', 'scam', or 'privacy'" +
+                          Environment.NewLine + "- Type 'help' to see this menu again" +
+                          Environment.NewLine + "- Type 'bye' to exit";
+
+            AppendBotMessage(menu);
+            activityLog.AddLog("Menu", "User viewed the main menu");
+        }
+
+        private void AddTaskThroughChat(string input)
+        {
+            string taskTitle = ExtractTaskTitle(input);
+
+            if (string.IsNullOrEmpty(taskTitle))
+            {
+                AppendBotMessage("Please tell me what task you want to add. Example: 'add task review my passwords'");
+                return;
+            }
+
+            bool hasReminder = input.Contains("remind") || input.Contains("reminder");
+
+            if (hasReminder)
+            {
+                DateTime reminderDate = ExtractReminderDate(input);
+                if (reminderDate != DateTime.MinValue)
+                {
+                    taskAssistant.AddTask(taskTitle, "", reminderDate);
+                    AppendBotMessage("Task '" + taskTitle + "' added with reminder for " + reminderDate.ToShortDateString());
+                    activityLog.AddLog("Task Added", "Task '" + taskTitle + "' added with reminder");
+                    return;
+                }
+            }
+
+            taskAssistant.AddTask(taskTitle, "", DateTime.MinValue);
+            AppendBotMessage("Task '" + taskTitle + "' added successfully!");
+            activityLog.AddLog("Task Added", "Task '" + taskTitle + "' added");
+        }
+
+        private void ViewTasks()
+        {
+            ViewTasksForm viewForm = new ViewTasksForm(taskAssistant);
+            viewForm.ShowDialog();
+        }
+
+        private void CompleteTaskThroughChat(string input)
+        {
+            string taskTitle = ExtractTaskTitle(input);
+
+            if (string.IsNullOrEmpty(taskTitle))
+            {
+                AppendBotMessage("Tell me which task to complete. Example: 'complete task review my passwords'");
+                return;
+            }
+
+            bool completed = taskAssistant.CompleteTask(taskTitle);
+
+            if (completed)
+            {
+                AppendBotMessage("Task '" + taskTitle + "' marked as completed!");
+                activityLog.AddLog("Task Completed", "Task '" + taskTitle + "' completed");
+            }
+            else
+            {
+                AppendBotMessage("Task '" + taskTitle + "' not found. Check your tasks with 'view tasks'.");
+            }
+        }
+
+        private void DeleteTaskThroughChat(string input)
+        {
+            string taskTitle = ExtractTaskTitle(input);
+
+            if (string.IsNullOrEmpty(taskTitle))
+            {
+                AppendBotMessage("Tell me which task to delete. Example: 'delete task review my passwords'");
+                return;
+            }
+
+            bool deleted = taskAssistant.DeleteTask(taskTitle);
+
+            if (deleted)
+            {
+                AppendBotMessage("Task '" + taskTitle + "' deleted.");
+                activityLog.AddLog("Task Deleted", "Task '" + taskTitle + "' deleted");
+            }
+            else
+            {
+                AppendBotMessage("Task '" + taskTitle + "' not found.");
+            }
+        }
+
+        private void StartQuiz()
+        {
+            List<QuizQuestion> questions = quizGame.GetQuestions();
+
+            if (questions.Count == 0)
+            {
+                AppendBotMessage("No quiz questions available.");
+                return;
+            }
+
+            AppendBotMessage("Starting Cybersecurity Quiz! You will answer " + questions.Count + " questions.");
+
+            QuizForm quizForm = new QuizForm(questions, userName);
+            quizForm.ShowDialog();
+
+            int score = quizForm.Score;
+            int total = quizForm.TotalQuestions;
+
+            quizGame.SaveScore(userName, score, total);
+
+            string feedback = score >= 8 ? "Excellent! You are a cybersecurity pro!" :
+                              score >= 6 ? "Good job! Keep learning!" :
+                              "Keep practicing to stay safe online!";
+
+            AppendBotMessage("Quiz complete! You scored " + score + " out of " + total + ". " + feedback);
+            activityLog.AddLog("Quiz", "User scored " + score + "/" + total + " in quiz");
+        }
+
+        private void ShowActivityLog()
+        {
+            ActivityLogForm logForm = new ActivityLogForm(activityLog);
+            logForm.ShowDialog();
+        }
+
+        private void ShowQuizScores()
+        {
+            DataTable scores = quizGame.GetTopScores(5);
+
+            if (scores.Rows.Count == 0)
+            {
+                AppendBotMessage("No quiz scores recorded yet. Play the quiz first!");
+                return;
+            }
+
+            string message = "Top 5 Quiz Scores:" + Environment.NewLine;
+            int rank = 1;
+            foreach (DataRow row in scores.Rows)
+            {
+                message = message + rank + ". " + row["player_name"] + " - " + row["score"] + "/" + row["total_questions"] + Environment.NewLine;
+                rank++;
+            }
+
+            AppendBotMessage(message);
+            activityLog.AddLog("View Scores", "User viewed top quiz scores");
+        }
+
+        private void ShowTaskCount()
+        {
+            int pending = taskAssistant.GetPendingCount();
+            int total = taskAssistant.GetTotalCount();
+
+            string message = "Task Summary:" + Environment.NewLine;
+            message = message + "- Total tasks: " + total + Environment.NewLine;
+            message = message + "- Pending tasks: " + pending + Environment.NewLine;
+            message = message + "- Completed tasks: " + (total - pending) + Environment.NewLine;
+
+            AppendBotMessage(message);
+        }
+
+        private string ExtractTaskTitle(string input)
+        {
+            string lowerInput = input.ToLower();
+
+            string[] phrases = { "add task", "complete task", "delete task" };
+
+            foreach (string phrase in phrases)
+            {
+                if (lowerInput.Contains(phrase))
+                {
+                    int startIndex = lowerInput.IndexOf(phrase) + phrase.Length;
+                    if (startIndex < input.Length)
+                    {
+                        string title = input.Substring(startIndex).Trim();
+                        title = title.Replace("remind me", "").Replace("reminder", "").Replace("tomorrow", "").Replace("today", "").Trim();
+                        if (!string.IsNullOrEmpty(title))
+                            return title;
+                    }
+                }
+            }
+
+            return input.Trim();
+        }
+
+        private DateTime ExtractReminderDate(string input)
+        {
+            string lowerInput = input.ToLower();
+
+            if (lowerInput.Contains("today"))
+            {
+                return DateTime.Now.Date;
+            }
+            else if (lowerInput.Contains("tomorrow"))
+            {
+                return DateTime.Now.Date.AddDays(1);
+            }
+            else if (lowerInput.Contains("in") && lowerInput.Contains("day"))
+            {
+                try
+                {
+                    int days = 0;
+                    string[] words = lowerInput.Split(' ');
+                    for (int i = 0; i < words.Length - 1; i++)
+                    {
+                        if (words[i] == "in" && words[i + 1].Contains("day"))
+                        {
+                            int.TryParse(words[i + 1].Replace("days", "").Replace("day", "").Trim(), out days);
+                            if (days > 0)
+                                return DateTime.Now.Date.AddDays(days);
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            return DateTime.MinValue;
         }
 
         private string DetectSentiment(string input)
@@ -409,6 +727,39 @@ namespace KamoChatBotGUI
                 btnSend_Click(sender, e);
                 e.Handled = true;
             }
+        }
+
+        // Button Click Handlers
+        private void btnViewTasks_Click(object sender, EventArgs e)
+        {
+            if (string.IsNullOrEmpty(userName))
+            {
+                AppendBotMessage("Please enter your name first.");
+                return;
+            }
+            ViewTasks();
+        }
+
+        private void btnQuiz_Click(object sender, EventArgs e)
+        {
+            if (string.IsNullOrEmpty(userName))
+            {
+                AppendBotMessage("Please enter your name first.");
+                return;
+            }
+            StartQuiz();
+        }
+
+        private void btnActivityLog_Click(object sender, EventArgs e)
+        {
+            ShowActivityLog();
+        }
+
+        private void btnClearChat_Click(object sender, EventArgs e)
+        {
+            flowChat.Controls.Clear();
+            AppendBotMessage("Chat cleared.");
+            activityLog.AddLog("Clear Chat", "User cleared the chat");
         }
     }
 }
